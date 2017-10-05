@@ -11,260 +11,352 @@ import numpy as np
 import matplotlib.pyplot as plt
 import math as math
 from pylab import *
-import io, os, sys, types
+import io
+import os
+import sys
+import types
+from collections import defaultdict
 pd.options.mode.chained_assignment = None  # default='warn'
 sns.set_style("whitegrid")
 mpl.rc("savefig", dpi=150)
 
-def PlotLikertOverConditions(tb,nPoint,customLikertRange=None,tb2=None,customLikertRange2=None):
-    # This functions gets a table of questions and their responces in likert scale (1:positive N:negative) as coulmns, as well as a another column indicating the condition of the responce
-    # This function can also get another table for general questions after all conditions
-    
-    
-    Qs=tb.columns.tolist()
-    CustomLikertLabels_orderd_by_y_axis=[]
-    
-    df=tb.copy(deep=True)
-    likert_colors= sns.color_palette("coolwarm", nPoint)
-    likert_colors=[(1.0,1.0,1.0)]+likert_colors
 
-    
-    font1 = {'family': 'sans-serif','color':  'white','weight': 'normal','size': 10,}
-    font2 = {'family': 'sans-serif','color':  'grey','weight': 'normal','size': 8,}
-    LikertRange=[1,2,3,4,5]
-    fig, ax = plt.subplots(1, 1,figsize=(10,8))
-    
-    
-    ##--------------------------------------------------------------------
-    ##Seperate into conditions and count the scores for each
-    df_conds=[]
-    middles_all=[]
-#     df.loc[:,'condition']=df['condition'].astype(np.int32)
-    
-    barwidth=0.2
-    def SHIFT(N,i):
-        return float(i)*barwidth*1.0-(float(N)-1)*barwidth
-        
-   
-    conds=[]
-    for cond in df['condition'].unique():
-        conds.append(cond)
-        temp=df[df['condition']==cond]
-        temp.drop('condition', axis=1,inplace=True)
-        temp=pd.DataFrame(temp.stack())
-        temp=pd.DataFrame(temp.unstack(0))
+# Constants
+FONT1 = {
+    'family': 'sans-serif',
+    'color': 'white',
+    'weight': 'normal',
+    'size': 10,
+}
+FONT2 = {
+    'family': 'sans-serif',
+    'color': 'grey',
+    'weight': 'normal',
+    'size': 8,
+}
+EXTRA_SHIFT = 0.5
+BARWIDTH = 0.2
+WHITE = (1.0, 1.0, 1.0)
+SPACES_AFTER_LABEL = 4
+RIGHT_MARGIN = 2
 
 
-        g= lambda x,y: x.loc[y] if y in x.index else 0
-        temp2=temp.copy(deep=True)
-        for q in range(1,len(Qs)):
-            for i in range(1,nPoint+1):
-    #             print 'there was %s of %s in Q %s'%(g(temp.loc[Qs[q],:].value_counts(),i),i,q)
-                temp2.loc[Qs[q], i]=g(temp.loc[Qs[q],:].value_counts(),i)
-        
-        temp2.drop(0, axis=1,inplace=True)
-        temp2.columns = temp2.columns.droplevel(level=1)
-#         print temp2
-        df_conds.append( temp2)
-        middles_all.append(temp2[LikertRange[:len(LikertRange)/2]].sum(axis=1)+temp2[len(LikertRange)/2+1]*.5)
-
-    
-    ##--------------------------------------------------------------------
-    ## general questions
-    df_conds_generals=[]
-    middles_all_generals=[]
-    ## here we add general questions as well if there is any!
-    if type(tb2)==pd.core.frame.DataFrame:
-        temp=tb2.copy(deep=True)
-        temp2=tb2.T.copy(deep=True)
-        
-        for gQ, g_col in temp.iteritems():
-            g= lambda x,y: x.loc[y] if y in x.index else 0
-            for i in range(1,nPoint+1):
-                temp2.loc[gQ, i]=g(g_col.astype(np.int32,inplace=True).value_counts(),i)
-                
-        temp2=temp2.loc[:,range(1,nPoint+1)] 
-#         print temp2
-        df_conds_generals= temp2
-        middles_all_generals=temp2[LikertRange[:len(LikertRange)/2]].sum(axis=1)+temp2[len(LikertRange)/2+1]*.5
+def check_valid(retval=None):
+    def wrap(func):
+        def wrapper(self, *args, **kwargs):
+            if not self.valid:
+                return retval
+            return func(self, *args, **kwargs)
+        return wrapper
+    return wrap
 
 
-    ##--------------------------------------------------------------------
-        
-    ## add shift column to each table
-    if len(np.array(middles_all_generals))==0: 
-        longest= max(map(max,  np.array(middles_all)) )
-    else:
-        longest= max(max(map(max,  np.array(middles_all)) ),max(np.array(middles_all_generals)) ) 
-        
-        
-    
-    patches_already_moved=[]
-    for cond,df_c in enumerate(df_conds):
+class LikertData(object):
+    def __init__(self, tb, n_point, ax, **kwargs):
+        self.tb = tb
+        self.ax = ax
+        self.n_point = n_point
+        self.condition_column = kwargs.get('condition_column', 'condition')
+        self.reverse_colors = kwargs.get('reverse_colors', False)
+        self._invalidate()
 
-        df_c.insert(0, '', (middles_all[cond] - longest).abs())
-        complete_longest=int(longest+(df_c[:].sum(axis=1).max()-longest))#in our case is 16
+    def _invalidate(self):
+        self._condition_dfs = None
+        self._conditions = None
+        self._questions = None
+        self._total_participants = None
+        self._colors = None
+        self._middles_all = None
 
-        patch_handles = []
-        
-        patch_handles.append(df_c.plot.barh(ax=ax,stacked=True, color=likert_colors, legend=False,
-                                            width=barwidth,edgecolor='white'))#,alpha=1.0-(float(cond)/len(df_conds))*0.7
+    @property
+    @check_valid(0)
+    def total_participants(self):
+        if self._total_participants is None:
+            self._total_participants = len(self.tb)
+            if self.condition_column is not None:
+                self._total_participants /= len(self.conditions)
+        return self._total_participants
 
-        shift=SHIFT(len(df_conds),cond)
-        
-        for j in xrange(len(patch_handles)):
-            for i, p in enumerate(patch_handles[j].get_children()):
-                
-                
-                if type(p)==(matplotlib.patches.Rectangle):
-                    
-                    if p.get_height()==barwidth and not (p in patches_already_moved):
-#                         print (p in patches_already_moved),
-                        
-                        p.set_xy((p.get_x(),p.get_y()+shift))
-                    
- 
-                        if p.get_width()>1 and p.get_facecolor()[0:3]!=likert_colors[0]:#p.get_facecolor()!=(1.0, 1.0, 1.0, 1.0):
-#                             if cond % 2 == 0:
-#                                 p.set_hatch('\ '*cond)
-#                             else:
-#                                 p.set_hatch('/ '*cond)
-                                
-                            patch_handles[j].text(
-                                p.get_x()+p.get_width()/2.,
-                                p.get_y()+ p.get_height() /(len(Qs)-1),
-                                "{0:.0f}%".format(p.get_width()/(len(tb)/len(tb['condition'].unique())) * 100),
-                                ha="center",
-                                fontdict=font1)#.set_zorder(-1)
+    @property
+    @check_valid(list())
+    def questions(self):
+        if self._questions is None:
+            self._questions = self.df.columns.tolist()
+            if self.condition_column in self._questions:
+                self._questions.remove(self.condition_column)
+            else:
+                self._questions = self._questions[::-1]
+        return self._questions
 
-        
-        
-        patches_already_moved=patches_already_moved+patch_handles[j].get_children()
+    @property
+    @check_valid(list())
+    def conditions(self):
+        if self._conditions is None:
+            if self.condition_column is None:
+                self._conditions = []
+            else:
+                self._conditions = self.df[self.condition_column].unique()
+        return self._conditions
 
-    yticks=list(ax.get_yticks())
-#     print customLikertRange
-    CustomLikertLabels_orderd_by_y_axis=[customLikertRange[key] if (customLikertRange!=None and customLikertRange.get(key)) 
-                                         else ['very low','very high'] 
-                                         for key in (ax.get_yticks()+1)]
- 
-    
-    if type(tb2)==pd.core.frame.DataFrame:
-        CustomLikertLabels_orderd_by_y_axis=[customLikertRange2[key] if (customLikertRange2!=None and customLikertRange2.get(key)) 
-                                         else ['very low','very high'] 
-                                         for key in range(1,len(df_conds_generals)+1)][::-1]+CustomLikertLabels_orderd_by_y_axis
-        
-        
-        ## Plotting general questions
-        def SHIFT2(i):
-            i=i+0.1
-            extra=0.5
-            return -1.3 -(i*(2*(barwidth)+extra))
+    @property
+    @check_valid(list())
+    def condition_dfs(self):
+        if self._condition_dfs is None:
+            self._condition_dfs = []
 
-        df_conds_generals.insert(0, '', (middles_all_generals - longest).abs())
-        for i in range(0,len(df_conds_generals)):
-            y=SHIFT2(i-0.1)
-            yticks=[y]+ yticks
-            y=y+barwidth/2.0
-            ax.plot([-5,df_conds_generals.iloc[i,0]],[y,y],linestyle=':', color='grey', alpha=.2,linewidth=1)
-            
+            for cond in self.conditions:
+                # Count values for each question
+                cond_rows = self.df[self.condition_column] == cond
+                cdf = self.df.loc[cond_rows, self.questions]
+                self._condition_dfs.append(self._condition_df(cdf))
+            if self.condition_column is None:
+                self._condition_dfs = [
+                    self._condition_df(self.df.loc[:, self.questions])[::-1]
+                ]
 
+        return self._condition_dfs
 
-        patch_handles = []
-        patch_handles.append(df_conds_generals.plot.barh(ax=ax,stacked=True, color=likert_colors, legend=False,
-                                            width=barwidth,edgecolor='white'))   
+    def _condition_df(self, df):
+        cond_counts = df.apply(pd.Series.value_counts)
+        return cond_counts.reindex(self.range).T.fillna(0)
 
-        for j in xrange(len(patch_handles)):
-            for i, p in enumerate(patch_handles[j].get_children()):
+    @property
+    @check_valid(list())
+    def middles_all(self):
+        if self._middles_all is None:
+            self._middles_all = [
+                c[self.half_range].sum(axis=1) + c[self.n_point // 2 + 1] * .5
+                for c in self.condition_dfs
+            ]
+        return self._middles_all
 
+    @property
+    def tb(self):
+        return self._tb
 
-                if type(p)==(matplotlib.patches.Rectangle):
+    @tb.setter
+    def tb(self, new_tb):
+        self._tb = new_tb
+        if not self.valid:
+            return
+        self.df = self._tb.copy(deep=True)
+        self._invalidate()
 
-                    if p.get_height()==barwidth and not (p in patches_already_moved):
-                        shift=SHIFT2(p.get_y())
+    @property
+    def colors(self):
+        if self._colors is None:
+            self._colors = sns.color_palette("coolwarm", self.n_point)
+            if self.reverse_colors:
+                self._colors = list(reversed(self._colors))
+            self._colors = [WHITE] + self._colors
+        return self._colors
 
-                        p.set_xy((p.get_x(),shift))
-                        if p.get_width()>1 and p.get_facecolor()[0:3]!=likert_colors[0]:#p.get_facecolor()!=(1.0, 1.0, 1.0, 1.0):
+    @property
+    def range(self):
+        return list(range(1, self.n_point + 1))
 
-                            patch_handles[j].text(
-                                p.get_x()+p.get_width()/2.,
-                                shift+ p.get_height() /(len(Qs)-1),
-                                "{0:.0f}%".format(p.get_width()/(len(tb)/len(tb['condition'].unique())) * 100),
-                                ha="center",
-                                fontdict=font1)#.set_zorder(-1)
+    @property
+    def half_range(self):
+        return list(range(1, self.n_point // 2 + 1))
 
+    def middle(self, condition):
+        return self.middles_all[condition]
 
+    @property
+    @check_valid(0)
+    def longest_middle(self):
+        return np.array(self.middles_all).max()
 
-        patches_already_moved=patches_already_moved+patch_handles[j].get_children()
+    @property
+    @check_valid(0)
+    def complete_longest(self):
+        return max([(df_c.sum(axis=1) - self.middle(cond)).max()
+                    for cond, df_c in enumerate(self.condition_dfs)])
 
-        
-    z = ax.axvline(longest, linestyle='-', color='black', alpha=.5,linewidth=1)
-    z.set_zorder(-1)  
-#     print longest
+    def comp_y(self, y, cond, dashed=False):
+        n = len(self.conditions)
+        if n > 0:
+            return y + (float(cond) * 1.0 - float(n) + 1) * BARWIDTH
+        elif dashed:
+            return -1.3 - y * (2 * BARWIDTH + EXTRA_SHIFT) + BARWIDTH / 2
+        return -1.3 - (y + 0.1) * (2 * BARWIDTH + EXTRA_SHIFT)
 
+    @property
+    def valid(self):
+        return self._tb is not None
 
-    plt.xlim(-5, complete_longest+5)
-    ymin=-1*len(df_conds_generals)-1
-    plt.ylim(ymin,len(Qs)-1.5)
-    
-    xvalues = range(0, complete_longest,10)
-    xlabels = []#[str(x-longest) for x in xvalues]
-    plt.xticks(xvalues, xlabels)
-    plt.xlabel('Percentage', fontsize=12,horizontalalignment='left')
-    ax.xaxis.set_label_coords(float(longest)/(complete_longest+5),-0.01)
+    def plot_condition(self, cond, longest, patches_already_moved, total):
+        df = self.condition_dfs[cond]
+        df.insert(0, '', (self.middle(cond) - longest).abs())
 
-    general_Qs=[] if  len(df_conds_generals)==0 else df_conds_generals.index.values.tolist() #+['']
-    ylabels =general_Qs +Qs[1:]
+        patch_handles = df.plot.barh(ax=self.ax, stacked=True, color=self.colors,
+                                     legend=False, width=BARWIDTH,
+                                     edgecolor='white')
 
-    plt.yticks(yticks, ylabels)
-    
-    for tick in ax.yaxis.get_major_ticks():
-        tick.label.set_fontsize(12) 
+        patches = [p for p in patch_handles.get_children()
+                   if _good_patch(p, patches_already_moved)]
 
+        for p in patches:
+            p.set_xy((p.get_x(), self.comp_y(p.get_y(), cond)))
 
-    ## adding condition indicators on the y axis
-    for cond,df_c in enumerate(df_conds): 
-        shift=SHIFT(len(df_conds),cond)
-        for row in  range(0,len(df_c)):
-            
-            y=row+shift
-            x=ax.get_xlim()[0]+0.5
-#             x=ax.get_xlim()[0]+1.3
-            ax.text(
-                x,
-                y-barwidth/4.0,
-#                 str(cond),
-#                 'C ' + str(cond+1),
-                conds[cond],
+            if p.get_width() <= 1 or p.get_facecolor()[0: 3] == WHITE:
+                continue
+
+            percent = p.get_width() / self.total_participants * 100
+            patch_handles.text(
+                p.get_x() + p.get_width() / 2,
+                p.get_y() + p.get_height() / total,
+                "{0:.0f}%".format(percent),
                 ha="center",
-                fontdict=font2)
-            ax.plot([x+0.7,df_c.iloc[row,0]],[y,y],linestyle=':', color='grey', alpha=.2,linewidth=1)
+                fontdict=FONT1
+            )
 
-            
+        return patches_already_moved + patches
+
+    def plot_dashed(self, cond, min_x):
+        for i in range(0, len(self.questions)):
+            y = self.comp_y(i, cond, True)
+            if cond < len(self.conditions):
+                self.ax.text(
+                    min_x - 0.7,
+                    y - BARWIDTH / 4.0,
+                    self.conditions[cond],
+                    ha="center",
+                    fontdict=FONT2)
+            self.ax.plot([min_x, self.condition_dfs[cond].iloc[i, 0]], [y, y],
+                         linestyle=':', color='grey', alpha=.2, linewidth=1)
+
+
+def plot_likert_over_conditions(tb, n_point, custom_likert_range=None, tb2=None,
+                                custom_likert_range2=None, ax=None, **kwargs):
+    '''
+    This function takes a table of questions and their responses in likert scale
+    (1:positive N:negative) as columns, as well as a another column indicating
+    the condition of the response.
+
+    This function also takes another table for general questions after all
+    conditions.
+
+    Other keyword arguments:
+    reverse_colors: (bool) if True, reverses colors in the scale
+    condition_column: (str) name of the condition column (default: 'condition')
+    '''
+
+    if ax is None:
+        _fig, ax = plt.subplots(1, 1, figsize=(10, 8))
+
+    ld = LikertData(tb, n_point, ax, **kwargs)
+    kwargs2 = kwargs.copy()
+    kwargs2['condition_column'] = None
+    gd = LikertData(tb2, n_point, ax, **kwargs2)
+    custom_likert_labels_by_y_axis = []
+
+    # --------------------------------------------------------------------
+    # add shift column to each table
+    longest = max(ld.longest_middle, gd.longest_middle)
+    complete_longest = int(longest + max(ld.complete_longest,
+                                         gd.complete_longest))
+
+    patches_already_moved = []
+    for cond, df_c in enumerate(ld.condition_dfs):
+        patches_already_moved = ld.plot_condition(cond, longest,
+                                                  patches_already_moved,
+                                                  len(ld.questions))
+
+    yticks = list(ax.get_yticks())
+
+    custom_likert_labels_by_y_axis = _range2label(custom_likert_range,
+                                                  len(ld.questions))
+
+    if gd.valid:
+        g_lab = _range2label(custom_likert_range2, len(gd.questions))[:: -1]
+        custom_likert_labels_by_y_axis = g_lab + custom_likert_labels_by_y_axis
+
+        # Plotting general questions
+        g_yticks = [gd.comp_y(i, 0, True)
+                    for i in range(len(gd.questions) - 1, -1, -1)]
+        yticks = g_yticks + yticks
+
+        patches_already_moved = gd.plot_condition(0, longest,
+                                                  patches_already_moved,
+                                                  len(ld.questions))
+        gd.plot_dashed(0, -5)
+
+    z = ax.axvline(longest, linestyle='-', color='black', alpha=.5,
+                   linewidth=1)
+    z.set_zorder(-1)
+
+    plt.xlim(-5, complete_longest + RIGHT_MARGIN)
+    ymin = -1 * len(gd.condition_dfs[0] if gd.condition_dfs else []) - 1
+    plt.ylim(ymin, len(ld.questions) - 0.5)
+
+    xvalues = range(0, complete_longest, 10)
+    plt.xticks(xvalues, [])
+    plt.xlabel('Percentage', fontsize=12, horizontalalignment='left')
+    xlabel_x = float(longest) / (complete_longest + RIGHT_MARGIN)
+    ax.xaxis.set_label_coords(xlabel_x, -0.01)
+
+    ylabels = gd.questions + ld.questions
+
+    plt.yticks(yticks, [yl + ' ' * SPACES_AFTER_LABEL for yl in ylabels])
+
+    for tick in ax.yaxis.get_major_ticks():
+        tick.label.set_fontsize(12)
+
+    # adding condition indicators on the y axis
+    for cond, df_c in enumerate(ld.condition_dfs):
+        ld.plot_dashed(cond, ax.get_xlim()[0] + 0.5 + 0.7)
 
     plt.grid('off')
     ax.spines['left'].set_visible(False)
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
-#     print yticks
-    ## adding Likert range legend 
-    for i,y_tick in enumerate(yticks):
 
-        v=CustomLikertLabels_orderd_by_y_axis[i]
-        x=-12
-        
-        y=yticks[i]-0.4
-        ax.text(x,y, v[0],fontsize = 8,zorder = 6, color = 'white',horizontalalignment='right',
-                    bbox={'edgecolor':'none','facecolor':likert_colors[1], 'alpha':1.0, 'pad':2})  
-        
-        middle_colors=likert_colors[1:-1]
-        for ci,c in enumerate(middle_colors):
-            x=x+0.3
-            ax.text(x,y,' ',fontsize = 8,zorder = 6, color = 'white',horizontalalignment='right',
-                    bbox={'edgecolor':'none','facecolor':middle_colors[ci], 'alpha':1.0, 'pad':2})  
-            
-            
-        ax.text(x+0.2,y,v[1],fontsize = 8,zorder = 6, color = 'white',horizontalalignment='left',
-                    bbox={'edgecolor':'none','facecolor':likert_colors[-1], 'alpha':1.0, 'pad':2})  
-        
+    # adding Likert range legend
+    draw_legend(yticks, custom_likert_labels_by_y_axis, ax, ld.colors)
 
     plt.show()
+
+
+def _g(x, y):
+    return x.loc[y] if y in x.index else 0
+
+
+def _good_patch(p, patches_already_moved):
+    return isinstance(p, (matplotlib.patches.Rectangle)) and \
+        p not in patches_already_moved and p.get_height() == BARWIDTH
+
+
+def _range2label(custom_likert_range, n_questions):
+    if custom_likert_range is None:
+        custom_likert_range = dict()
+    custom_likert_range = defaultdict(lambda: ['very low', 'very high'],
+                                      custom_likert_range)
+    return [custom_likert_range[key] for key in range(1, n_questions + 1)]
+
+
+def _make_bbox(facecolor):
+    return {
+        'edgecolor': 'none',
+        'facecolor': facecolor,
+        'alpha': 1.0,
+        'pad': 2
+    }
+
+
+def draw_legend(yticks, custom_likert_labels_by_y_axis, ax, colors):
+    for i, y_tick in enumerate(yticks):
+        v = custom_likert_labels_by_y_axis[i]
+        x = -12
+
+        y = yticks[i] - 0.4
+        ax.text(x, y, v[0], fontsize=8, zorder=6, color='white',
+                horizontalalignment='right', bbox=_make_bbox(colors[1]))
+
+        for ci, c in enumerate(colors[1:-1]):
+            x = x + 0.3
+            ax.text(x, y, '-', fontsize=8, zorder=6, color=c,
+                    horizontalalignment='right', bbox=_make_bbox(c))
+
+        ax.text(x + 0.2, y, v[1], fontsize=8, zorder=6, color='white',
+                horizontalalignment='left', bbox=_make_bbox(colors[-1]))
